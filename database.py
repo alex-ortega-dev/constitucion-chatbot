@@ -62,6 +62,7 @@ def save_conversation(supabase, pregunta, respuesta, modo, tiempo_respuesta, ses
         bool: True si se guardó correctamente, False si hubo error
     """
     if not supabase:
+        st.warning("⚠️ Supabase no está conectado - no se guardará la conversación")
         return False
     
     try:
@@ -73,10 +74,22 @@ def save_conversation(supabase, pregunta, respuesta, modo, tiempo_respuesta, ses
             "session_id": session_id
         }
         
+        # Debug más persistente
+        with st.container():
+            st.write("🔍 **Datos a guardar:**")
+            st.json(data)
+        
         result = supabase.table(SUPABASE_TABLE).insert(data).execute()
+        
+        with st.container():
+            st.success("✅ **Conversación guardada exitosamente**")
+            st.write("📊 Resultado:", result.data)
+        
         return True
     except Exception as e:
-        st.error(f"❌ Error guardando conversación: {e}")
+        with st.container():
+            st.error(f"❌ **Error detallado:** {str(e)}")
+            st.error(f"🔍 **Tipo de error:** {type(e).__name__}")
         return False
 
 def get_analytics(supabase):

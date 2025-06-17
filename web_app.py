@@ -131,53 +131,39 @@ def simulate_streaming_response(response_container, respuesta_completa):
 
 def process_user_question(user_input, send_button, qa_chain, supabase):
     """Procesa la pregunta del usuario"""
-    # Verificar si se debe procesar la pregunta
-    should_process = (
-        (send_button and user_input.strip()) or 
-        (user_input and user_input.strip() and st.session_state.get('last_input') != user_input)
-    )
-    
-    if should_process and user_input.strip():
-        st.session_state.last_input = user_input
-        
+    if send_button and user_input.strip():
         # Añadir pregunta al historial
         st.session_state.messages.append({"role": "user", "content": user_input})
-        
-        # Mostrar pregunta inmediatamente
-        st.markdown(f'<div class="chat-message user-message"><strong>🙋‍♂️ Tú:</strong> {user_input}</div>', unsafe_allow_html=True)
-        
-        # Contenedor para respuesta streaming
-        response_container = st.empty()
         
         try:
             # Medir tiempo de respuesta
             start_time = time.time()
             
             # Obtener respuesta del chatbot
-            respuesta_completa = get_response(qa_chain, user_input)
+            with st.spinner("Consultando la Constitución..."):
+                respuesta_completa = get_response(qa_chain, user_input)
             
             # Calcular tiempo de respuesta
             tiempo_respuesta = time.time() - start_time
             
-            # Simular streaming
-            simulate_streaming_response(response_container, respuesta_completa)
-            
-            # Guardar en base de datos
-            if supabase:
-                save_conversation(
-                    supabase, 
-                    user_input, 
-                    respuesta_completa, 
-                    st.session_state.mode, 
-                    tiempo_respuesta,
-                    st.session_state.session_id
-                )
-            
             # Añadir respuesta al historial
             st.session_state.messages.append({"role": "assistant", "content": respuesta_completa})
             
-            # Rerun para limpiar input
-            time.sleep(0.5)
+            # Guardar en base de datos (sin bloquear la UI)
+            if supabase:
+                try:
+                    data = {
+                        "pregunta": user_input,
+                        "respuesta": respuesta_completa,
+                        "modo": st.session_state.mode,
+                        "tiempo_respuesta": tiempo_respuesta,
+                        "session_id": st.session_state.session_id
+                    }
+                    supabase.table("conversaciones").insert(data).execute()
+                except:
+                    pass  # Fallar silenciosamente para no interrumpir la experiencia
+            
+            # Rerun para mostrar todo
             st.rerun()
             
         except Exception as e:
