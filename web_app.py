@@ -1,11 +1,15 @@
+"""
+Aplicación principal del Chatbot de la Constitución Española
+"""
+
 import streamlit as st
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
-from langchain_community.vectorstores import FAISS
-from langchain.chains import ConversationalRetrievalChain
-from langchain.memory import ConversationBufferMemory
-from langchain.prompts import PromptTemplate
-from dotenv import load_dotenv
-import os
+import time
+import uuid
+
+# Importar módulos locales
+from database import init_supabase, save_conversation, get_analytics
+from chatbot import load_chatbot_components, create_conversational_chain, get_response, clear_conversation_memory
+from config import CSS_STYLES, MODE_COLORS, MODE_NAMES, WELCOME_MESSAGES, STREAMING_DELAY
 
 # Configuración de la página
 st.set_page_config(
@@ -15,199 +19,24 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# CSS personalizado
-st.markdown("""
-<style>
-    .main-header {
-        text-align: center;
-        color: #d4af37;
-        font-size: 3rem;
-        font-weight: bold;
-        margin-bottom: 0.5rem;
-    }
-    .sub-header {
-        text-align: center;
-        color: #666;
-        font-size: 1.2rem;
-        margin-bottom: 2rem;
-    }
-    .chat-message {
-        padding: 1rem;
-        border-radius: 10px;
-        margin: 0.5rem 0;
-        color: #000;
-    }
-    .user-message {
-        background-color: #0066cc;
-        color: white;
-        border-left: 4px solid #004499;
-    }
-    .bot-message {
-        background-color: #2d2d2d;
-        color: white;
-        border-left: 4px solid #d4af37;
-    }
-    .stTextInput > div > div > input {
-        border-radius: 20px;
-    }
-    .mode-selector {
-        background-color: #f0f2f6;
-        padding: 1rem;
-        border-radius: 10px;
-        margin-bottom: 1rem;
-    }
-    .mode-button-selected {
-        background-color: #d4af37 !important;
-        color: white !important;
-        border: 2px solid #b8941f !important;
-    }
-    .mode-button-selected:hover {
-        background-color: #b8941f !important;
-        color: white !important;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# Diferentes prompts según el modo
-PROMPTS = {
-    "ciudadano": """
-Eres un asistente constitucional amigable que ayuda a ciudadanos españoles a entender sus derechos y deberes.
-
-PERSONALIDAD:
-- Habla de forma cercana y accesible
-- Evita jerga jurídica complicada
-- Usa ejemplos cotidianos
-- Sé empático con las preocupaciones ciudadanas
-
-INSTRUCCIONES:
-- Explica los conceptos de forma simple
-- Menciona SIEMPRE el artículo específico (ej: "según el artículo 20...")
-- Si no encuentras información, dilo claramente
-- Ofrece ejemplos prácticos cuando sea útil
-
-CONTEXTO DE LA CONSTITUCIÓN:
-{context}
-
-HISTORIAL DE CONVERSACIÓN:
-{chat_history}
-
-PREGUNTA DEL CIUDADANO:
-{question}
-
-RESPUESTA (como experto constitucional amigable):
-""",
-
-    "estudiante": """
-Eres un profesor de Derecho Constitucional que ayuda a estudiantes a preparar exámenes.
-
-PERSONALIDAD:
-- Pedagógico y estructurado
-- Incluye detalles importantes para exámenes
-- Conecta conceptos entre sí
-- Sugiere temas relacionados
-
-INSTRUCCIONES:
-- Estructura las respuestas de forma clara
-- Cita artículos específicos SIEMPRE
-- Explica el contexto histórico cuando sea relevante
-- Relaciona con otros artículos o principios constitucionales
-- Sugiere qué más estudiar sobre el tema
-
-CONTEXTO DE LA CONSTITUCIÓN:
-{context}
-
-HISTORIAL DE CONVERSACIÓN:
-{chat_history}
-
-PREGUNTA DEL ESTUDIANTE:
-{question}
-
-RESPUESTA (como profesor de Derecho Constitucional):
-""",
-
-    "profesional": """
-Eres un jurista experto en Derecho Constitucional que asesora a profesionales del derecho.
-
-PERSONALIDAD:
-- Técnico y preciso
-- Usa terminología jurídica apropiada
-- Analiza implicaciones legales
-- Referencia jurisprudencia cuando sea relevante
-
-INSTRUCCIONES:
-- Usa lenguaje jurídico preciso
-- Cita artículos exactos con numeración completa
-- Analiza las implicaciones prácticas
-- Menciona posibles interpretaciones doctrinales
-- Señala conexiones con otras normas del ordenamiento
-
-CONTEXTO DE LA CONSTITUCIÓN:
-{context}
-
-HISTORIAL DE CONVERSACIÓN:
-{chat_history}
-
-CONSULTA PROFESIONAL:
-{question}
-
-RESPUESTA (como jurista constitucionalista):
-"""
-}
-
-@st.cache_resource
-def load_chatbot():
-    """Carga el chatbot una sola vez con memoria"""
-    load_dotenv()
+def init_session_state():
+    """Inicializa las variables de estado de la sesión"""
+    if "session_id" not in st.session_state:
+        st.session_state.session_id = str(uuid.uuid4())
     
-    try:
-        embeddings = OpenAIEmbeddings(openai_api_key=os.getenv("OPENAI_API_KEY"))
-        db = FAISS.load_local("vectorstore/", embeddings, allow_dangerous_deserialization=True)
-        
-        llm = ChatOpenAI(
-            model="gpt-4.1",
-            temperature=0,
-            openai_api_key=os.getenv("OPENAI_API_KEY")
-        )
-        
-        return db, llm
-    except Exception as e:
-        st.error(f"Error cargando el chatbot: {e}")
-        return None, None
-
-def create_chain_with_prompt(llm, db, mode):
-    """Crea la cadena conversacional con el prompt específico"""
-    memory = ConversationBufferMemory(
-        memory_key="chat_history",
-        return_messages=True,
-        output_key="answer"
-    )
-    
-    prompt = PromptTemplate(
-        input_variables=["context", "chat_history", "question"],
-        template=PROMPTS[mode]
-    )
-    
-    qa_chain = ConversationalRetrievalChain.from_llm(
-        llm=llm,
-        retriever=db.as_retriever(search_kwargs={"k": 3}),
-        memory=memory,
-        return_source_documents=True,
-        combine_docs_chain_kwargs={"prompt": prompt},
-        verbose=False
-    )
-    
-    return qa_chain
-
-def main():
-    # Header
-    st.markdown('<h1 class="main-header">🇪🇸 Chatbot Constitución Española</h1>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">Pregúntame sobre cualquier artículo o concepto constitucional</p>', unsafe_allow_html=True)
-    
-    # Inicializar modo por defecto
     if "mode" not in st.session_state:
         st.session_state.mode = "ciudadano"
     
-    # Selector de modo
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+def render_header():
+    """Renderiza el header de la aplicación"""
+    st.markdown('<h1 class="main-header">🇪🇸 Chatbot Constitución Española</h1>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Pregúntame sobre cualquier artículo o concepto constitucional</p>', unsafe_allow_html=True)
+
+def render_mode_selector():
+    """Renderiza el selector de modos"""
     st.markdown('<div class="mode-selector">', unsafe_allow_html=True)
     col1, col2, col3 = st.columns(3)
     
@@ -233,69 +62,38 @@ def main():
             st.session_state.mode = "profesional"
     
     st.markdown('</div>', unsafe_allow_html=True)
-    
-    # Mostrar modo actual con estilo visual
-    mode_colors = {
-        "ciudadano": "#4CAF50",
-        "estudiante": "#2196F3", 
-        "profesional": "#9C27B0"
-    }
-    
-    mode_names = {
-        "ciudadano": "👨‍👩‍👧‍👦 Ciudadano - Explicaciones simples y cercanas",
-        "estudiante": "🎓 Estudiante - Respuestas pedagógicas y estructuradas", 
-        "profesional": "⚖️ Profesional - Análisis jurídico técnico"
-    }
-    
+
+def render_mode_indicator():
+    """Renderiza el indicador del modo actual"""
     st.markdown(f"""
-    <div style="background-color: {mode_colors[st.session_state.mode]}; 
+    <div style="background-color: {MODE_COLORS[st.session_state.mode]}; 
                 color: white; 
                 padding: 0.5rem; 
                 border-radius: 5px; 
                 text-align: center; 
                 margin-bottom: 1rem;">
-        <strong>Modo actual:</strong> {mode_names[st.session_state.mode]}
+        <strong>Modo actual:</strong> {MODE_NAMES[st.session_state.mode]}
     </div>
     """, unsafe_allow_html=True)
-    
-    # Cargar chatbot
-    db, llm = load_chatbot()
-    
-    if not db or not llm:
-        st.error("No se pudo cargar el chatbot. Verifica que existe la carpeta 'vectorstore/' y tu API key.")
-        return
-    
-    # Crear cadena con el prompt del modo actual
-    if "qa_chain" not in st.session_state or st.session_state.get("current_mode") != st.session_state.mode:
-        st.session_state.qa_chain = create_chain_with_prompt(llm, db, st.session_state.mode)
-        st.session_state.current_mode = st.session_state.mode
-        # Limpiar mensajes al cambiar de modo
-        st.session_state.messages = []
-    
-    # Inicializar historial de chat
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    
-    # Mensaje de bienvenida según el modo
+
+def initialize_welcome_message():
+    """Inicializa el mensaje de bienvenida según el modo"""
     if not st.session_state.messages:
-        welcome_messages = {
-            "ciudadano": "¡Hola! Soy tu asistente para entender la Constitución Española. Puedes preguntarme sobre tus derechos, cómo funciona el Estado, o cualquier duda que tengas sobre la Constitución. ¡Hablaré de forma sencilla y con ejemplos!",
-            "estudiante": "¡Bienvenido! Soy tu profesor virtual de Derecho Constitucional. Estoy aquí para ayudarte a estudiar, preparar exámenes y entender a fondo la Constitución Española. Te daré explicaciones estructuradas y conectaré conceptos entre sí.",
-            "profesional": "Saludos. Soy su consultor en Derecho Constitucional. Puedo asistirle con análisis jurídicos, interpretaciones doctrinales y cuestiones técnicas sobre la Constitución Española de 1978. Procederé con la precisión técnica que requiere su práctica profesional."
-        }
         st.session_state.messages.append({
             "role": "assistant", 
-            "content": welcome_messages[st.session_state.mode]
+            "content": WELCOME_MESSAGES[st.session_state.mode]
         })
-    
-    # Mostrar historial de chat
+
+def render_chat_history():
+    """Renderiza el historial de chat"""
     for message in st.session_state.messages:
         if message["role"] == "user":
             st.markdown(f'<div class="chat-message user-message"><strong>🙋‍♂️ Tú:</strong> {message["content"]}</div>', unsafe_allow_html=True)
         else:
             st.markdown(f'<div class="chat-message bot-message"><strong>🤖 Asistente:</strong> {message["content"]}</div>', unsafe_allow_html=True)
-    
-    # Input del usuario
+
+def render_user_input():
+    """Renderiza el input del usuario y devuelve la entrada y el botón"""
     col1, col2 = st.columns([6, 1])
     
     with col1:
@@ -307,66 +105,90 @@ def main():
         )
     
     with col2:
-        st.markdown("<br>", unsafe_allow_html=True)  # Espaciado para alinear
+        st.markdown("<br>", unsafe_allow_html=True)
         send_button = st.button("Enviar", type="primary", use_container_width=True)
     
-    # Procesar pregunta (tanto con botón como con Enter)
-    if (send_button and user_input.strip()) or (user_input and user_input.strip() and st.session_state.get('last_input') != user_input):
-        # Evitar duplicados con Enter
-        if user_input.strip():
-            st.session_state.last_input = user_input
-            
-            # Añadir pregunta del usuario al historial
-            st.session_state.messages.append({"role": "user", "content": user_input})
-            
-            # Mostrar la pregunta inmediatamente
-            st.markdown(f'<div class="chat-message user-message"><strong>🙋‍♂️ Tú:</strong> {user_input}</div>', unsafe_allow_html=True)
-            
-            # Contenedor para la respuesta streaming
-            response_container = st.empty()
-            
-            try:
-                # Invocar el chatbot
-                resultado = st.session_state.qa_chain.invoke({"question": user_input})
-                respuesta_completa = resultado['answer']
-                
-                # Simular streaming escribiendo palabra por palabra
-                response_container.markdown(f'<div class="chat-message bot-message"><strong>🤖 Asistente:</strong> ', unsafe_allow_html=True)
-                
-                palabras = respuesta_completa.split()
-                respuesta_parcial = ""
-                
-                for i, palabra in enumerate(palabras):
-                    respuesta_parcial += palabra + " "
-                    response_container.markdown(
-                        f'<div class="chat-message bot-message"><strong>🤖 Asistente:</strong> {respuesta_parcial}<span style="opacity: 0.5;">▊</span></div>', 
-                        unsafe_allow_html=True
-                    )
-                    # Pequeña pausa entre palabras
-                    import time
-                    time.sleep(0.05)
-                
-                # Mostrar respuesta final sin cursor
-                response_container.markdown(
-                    f'<div class="chat-message bot-message"><strong>🤖 Asistente:</strong> {respuesta_completa}</div>', 
-                    unsafe_allow_html=True
-                )
-                
-                # Añadir respuesta al historial
-                st.session_state.messages.append({"role": "assistant", "content": respuesta_completa})
-                
-                # Rerun para limpiar el input
-                time.sleep(0.5)
-                st.rerun()
-                
-            except Exception as e:
-                st.error(f"Error: {e}")
+    return user_input, send_button
+
+def simulate_streaming_response(response_container, respuesta_completa):
+    """Simula el efecto de streaming en la respuesta"""
+    palabras = respuesta_completa.split()
+    respuesta_parcial = ""
     
-    # Sidebar con información
+    for palabra in palabras:
+        respuesta_parcial += palabra + " "
+        response_container.markdown(
+            f'<div class="chat-message bot-message"><strong>🤖 Asistente:</strong> {respuesta_parcial}<span style="opacity: 0.5;">▊</span></div>', 
+            unsafe_allow_html=True
+        )
+        time.sleep(STREAMING_DELAY)
+    
+    # Mostrar respuesta final sin cursor
+    response_container.markdown(
+        f'<div class="chat-message bot-message"><strong>🤖 Asistente:</strong> {respuesta_completa}</div>', 
+        unsafe_allow_html=True
+    )
+
+def process_user_question(user_input, send_button, qa_chain, supabase):
+    """Procesa la pregunta del usuario"""
+    # Verificar si se debe procesar la pregunta
+    should_process = (
+        (send_button and user_input.strip()) or 
+        (user_input and user_input.strip() and st.session_state.get('last_input') != user_input)
+    )
+    
+    if should_process and user_input.strip():
+        st.session_state.last_input = user_input
+        
+        # Añadir pregunta al historial
+        st.session_state.messages.append({"role": "user", "content": user_input})
+        
+        # Mostrar pregunta inmediatamente
+        st.markdown(f'<div class="chat-message user-message"><strong>🙋‍♂️ Tú:</strong> {user_input}</div>', unsafe_allow_html=True)
+        
+        # Contenedor para respuesta streaming
+        response_container = st.empty()
+        
+        try:
+            # Medir tiempo de respuesta
+            start_time = time.time()
+            
+            # Obtener respuesta del chatbot
+            respuesta_completa = get_response(qa_chain, user_input)
+            
+            # Calcular tiempo de respuesta
+            tiempo_respuesta = time.time() - start_time
+            
+            # Simular streaming
+            simulate_streaming_response(response_container, respuesta_completa)
+            
+            # Guardar en base de datos
+            if supabase:
+                save_conversation(
+                    supabase, 
+                    user_input, 
+                    respuesta_completa, 
+                    st.session_state.mode, 
+                    tiempo_respuesta,
+                    st.session_state.session_id
+                )
+            
+            # Añadir respuesta al historial
+            st.session_state.messages.append({"role": "assistant", "content": respuesta_completa})
+            
+            # Rerun para limpiar input
+            time.sleep(0.5)
+            st.rerun()
+            
+        except Exception as e:
+            st.error(f"❌ Error procesando pregunta: {e}")
+
+def render_sidebar(supabase):
+    """Renderiza la barra lateral con información y analytics"""
     with st.sidebar:
         st.markdown("### ℹ️ Información")
         st.markdown(f"""
-        **Modo actual:** {mode_names[st.session_state.mode]}
+        **Modo actual:** {MODE_NAMES[st.session_state.mode]}
         
         **🔄 Cambia de modo** arriba para diferentes estilos de respuesta:
         
@@ -379,16 +201,84 @@ def main():
         - ¿Qué dice sobre el Rey?
         - ¿Cómo se reforma la Constitución?
         - ¿Qué es el Tribunal Constitucional?
-        
-        **Nota:** Las respuestas son orientativas. Para consultas legales específicas, consulta a un profesional.
         """)
         
+        # Analytics
+        if supabase:
+            st.markdown("### 📊 Estadísticas de Uso")
+            analytics = get_analytics(supabase)
+            
+            if analytics:
+                st.markdown(f"""
+                <div class="analytics-card">
+                    <strong>📈 Total conversaciones:</strong> {analytics['total_conversaciones']}<br>
+                    <strong>⚡ Tiempo promedio:</strong> {analytics['tiempo_promedio']}s<br>
+                    <strong>🎯 Modo más popular:</strong> {max(analytics['modos_populares'], key=analytics['modos_populares'].get)}<br>
+                    <strong>👥 Sesiones únicas:</strong> {analytics['sesiones_unicas']}
+                </div>
+                """, unsafe_allow_html=True)
+                
+                if st.button("🔄 Actualizar estadísticas"):
+                    st.rerun()
+            else:
+                st.info("📊 Aún no hay datos suficientes para mostrar estadísticas")
+        
+        # Botón limpiar chat
         if st.button("🗑️ Limpiar chat"):
             st.session_state.messages = []
-            # También limpiar la memoria del modelo
             if "qa_chain" in st.session_state:
-                st.session_state.qa_chain.memory.clear()
+                clear_conversation_memory(st.session_state.qa_chain)
             st.rerun()
+
+def main():
+    """Función principal de la aplicación"""
+    # Aplicar estilos CSS
+    st.markdown(CSS_STYLES, unsafe_allow_html=True)
+    
+    # Inicializar estado de sesión
+    init_session_state()
+    
+    # Inicializar Supabase
+    supabase = init_supabase()
+    
+    # Renderizar header
+    render_header()
+    
+    # Renderizar selector de modo
+    render_mode_selector()
+    
+    # Renderizar indicador de modo
+    render_mode_indicator()
+    
+    # Cargar componentes del chatbot
+    db, llm = load_chatbot_components()
+    
+    if not db or not llm:
+        st.error("❌ No se pudo cargar el chatbot. Verifica que existe la carpeta 'vectorstore/' y tu API key.")
+        return
+    
+    # Crear/actualizar cadena conversacional si es necesario
+    if ("qa_chain" not in st.session_state or 
+        st.session_state.get("current_mode") != st.session_state.mode):
+        
+        st.session_state.qa_chain = create_conversational_chain(llm, db, st.session_state.mode)
+        st.session_state.current_mode = st.session_state.mode
+        st.session_state.messages = []  # Limpiar mensajes al cambiar modo
+    
+    # Inicializar mensaje de bienvenida
+    initialize_welcome_message()
+    
+    # Renderizar historial de chat
+    render_chat_history()
+    
+    # Renderizar input del usuario
+    user_input, send_button = render_user_input()
+    
+    # Procesar pregunta del usuario
+    process_user_question(user_input, send_button, st.session_state.qa_chain, supabase)
+    
+    # Renderizar sidebar
+    render_sidebar(supabase)
 
 if __name__ == "__main__":
     main()
